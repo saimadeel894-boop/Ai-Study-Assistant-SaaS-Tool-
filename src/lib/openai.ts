@@ -1,6 +1,9 @@
+const isDev = import.meta.env.DEV;
 const OPENAI_API_KEY = import.meta.env.VITE_OPENAI_API_KEY;
-// Use vite proxy to avoid CORS issues in development
-const OPENAI_URL = "/api/v1/chat/completions";
+
+// In development: use Vite proxy to OpenAI directly
+// In production: use Vercel serverless function at /api/chat
+const OPENAI_URL = isDev ? "/api/v1/chat/completions" : "/api/chat";
 
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
@@ -12,17 +15,32 @@ export async function streamChatCompletion(
   systemPrompt: string,
   onChunk: (text: string) => void
 ): Promise<void> {
-  const response = await fetch(OPENAI_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
+  // In dev: call OpenAI directly via proxy with client key
+  // In prod: call our serverless function which has the key server-side
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+
+  let body: string;
+
+  if (isDev) {
+    headers["Authorization"] = `Bearer ${OPENAI_API_KEY}`;
+    body = JSON.stringify({
       model: "gpt-4o-mini",
       messages: [{ role: "system", content: systemPrompt }, ...messages],
       stream: true,
-    }),
+    });
+  } else {
+    body = JSON.stringify({
+      messages,
+      systemPrompt,
+    });
+  }
+
+  const response = await fetch(OPENAI_URL, {
+    method: "POST",
+    headers,
+    body,
   });
 
   if (!response.ok) {
