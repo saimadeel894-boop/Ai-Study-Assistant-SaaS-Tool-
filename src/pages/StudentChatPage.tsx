@@ -27,6 +27,7 @@ import {
   ChevronDown
 } from "lucide-react";
 import { toast } from "sonner";
+import { streamChatCompletion, getSystemPrompt, type ChatMessage } from "@/lib/openai";
 import { StudentHeader } from "@/components/StudentHeader";
 import { StudentFooter } from "@/components/StudentFooter";
 import { useStudySession } from "@/hooks/useLocalStorage";
@@ -96,7 +97,7 @@ const suggestedQuestions: Record<string, { icon: typeof Calculator; text: string
   ],
 };
 
-const CHAT_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/chat`;
+
 
 export default function StudentChatPage() {
   const [searchParams] = useSearchParams();
@@ -152,130 +153,48 @@ export default function StudentChatPage() {
     if (!messageText) setInput("");
     setIsLoading(true);
 
-    const apiMessages = [...messages.slice(1), userMessage].map((m) => ({
+    const apiMessages: ChatMessage[] = [...messages.slice(1), userMessage].map((m) => ({
       role: m.role,
       content: m.content,
     }));
 
-    let assistantContent = "";
+    const assistantMessageId = (Date.now() + 1).toString();
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: assistantMessageId,
+        role: "assistant",
+        content: "",
+        timestamp: new Date(),
+        showSuggestions: false,
+      },
+    ]);
 
     try {
-      const response = await fetch(CHAT_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-        },
-        body: JSON.stringify({ 
-          messages: apiMessages,
-          subjectMode: activeSubject,
-        }),
+      const systemPrompt = getSystemPrompt(activeSubject);
+      await streamChatCompletion(apiMessages, systemPrompt, (chunk) => {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMessageId
+              ? { ...m, content: m.content + chunk }
+              : m
+          )
+        );
       });
-
-      if (!response.ok) {
-        if (response.status === 429) {
-          toast.error("Rate limit exceeded. Please try again in a moment.");
-          throw new Error("Rate limit exceeded");
-        }
-        if (response.status === 402) {
-          toast.error("Service temporarily unavailable. Please try again later.");
-          throw new Error("Payment required");
-        }
-        throw new Error("Failed to get response");
-      }
-
-      if (!response.body) throw new Error("No response body");
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let textBuffer = "";
-
-      const assistantMessageId = (Date.now() + 1).toString();
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: assistantMessageId,
-          role: "assistant",
-          content: "",
-          timestamp: new Date(),
-          showSuggestions: false,
-        },
-      ]);
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        textBuffer += decoder.decode(value, { stream: true });
-
-        let newlineIndex: number;
-        while ((newlineIndex = textBuffer.indexOf("\n")) !== -1) {
-          let line = textBuffer.slice(0, newlineIndex);
-          textBuffer = textBuffer.slice(newlineIndex + 1);
-
-          if (line.endsWith("\r")) line = line.slice(0, -1);
-          if (line.startsWith(":") || line.trim() === "") continue;
-          if (!line.startsWith("data: ")) continue;
-
-          const jsonStr = line.slice(6).trim();
-          if (jsonStr === "[DONE]") break;
-
-          try {
-            const parsed = JSON.parse(jsonStr);
-            const content = parsed.choices?.[0]?.delta?.content as string | undefined;
-            if (content) {
-              assistantContent += content;
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantMessageId
-                    ? { ...m, content: assistantContent }
-                    : m
-                )
-              );
-            }
-          } catch {
-            textBuffer = line + "\n" + textBuffer;
-            break;
-          }
-        }
-      }
 
       // Show suggestions after response completes
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === assistantMessageId
-            ? { ...m, showSuggestions: true }
-            : m
+          m.id === assistantMessageId ? { ...m, showSuggestions: true } : m
         )
       );
-
-      if (textBuffer.trim()) {
-        for (let raw of textBuffer.split("\n")) {
-          if (!raw) continue;
-          if (raw.endsWith("\r")) raw = raw.slice(0, -1);
-          if (raw.startsWith(":") || raw.trim() === "") continue;
-          if (!raw.startsWith("data: ")) continue;
-          const jsonStr = raw.slice(6).trim();
-          if (jsonStr === "[DONE]") continue;
-          try {
-            const parsed = JSON.parse(jsonStr);
-            const content = parsed.choices?.[0]?.delta?.content as string | undefined;
-            if (content) {
-              assistantContent += content;
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantMessageId
-                    ? { ...m, content: assistantContent }
-                    : m
-                )
-              );
-            }
-          } catch { /* ignore */ }
-        }
-      }
     } catch (error) {
       console.error("Chat error:", error);
-      toast.error("Failed to get AI response. Please try again.");
+      if (error instanceof Error && error.message === "Rate limit exceeded") {
+        toast.error("Rate limit exceeded. Please try again in a moment.");
+      } else {
+        toast.error("Failed to get AI response. Please try again.");
+      }
       setMessages((prev) => {
         const last = prev[prev.length - 1];
         if (last?.role === "assistant" && !last.content) {

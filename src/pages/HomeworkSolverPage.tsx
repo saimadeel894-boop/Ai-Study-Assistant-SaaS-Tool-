@@ -24,6 +24,7 @@ import { Badge } from "@/components/ui/badge";
 import { StudentHeader } from "@/components/StudentHeader";
 import { StudentFooter } from "@/components/StudentFooter";
 import { toast } from "sonner";
+import { streamChatCompletion, getSystemPrompt, type ChatMessage } from "@/lib/openai";
 
 interface Message {
   id: string;
@@ -55,7 +56,7 @@ const exampleProblems = [
   },
 ];
 
-const CHAT_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/chat`;
+
 
 export default function HomeworkSolverPage() {
   const [problem, setProblem] = useState("");
@@ -85,10 +86,7 @@ export default function HomeworkSolverPage() {
     setProblem("");
     setIsLoading(true);
 
-    // Build conversation context with homework-solving system prompt
-    const systemMessage = {
-      role: "system",
-      content: `You are a patient homework tutor. When solving problems:
+    const systemPrompt = `You are a patient homework tutor. When solving problems:
 1. First, understand what the problem is asking
 2. Explain the concept briefly if needed
 3. Show the solution step-by-step
@@ -97,98 +95,42 @@ export default function HomeworkSolverPage() {
 6. Offer alternative methods if applicable
 7. End with a tip for similar problems
 
-IMPORTANT: Encourage understanding over copying. Remind students to learn the concept, not just get the answer.`
-    };
+Write in plain text only. No Markdown, no special characters like #, *, -.
+IMPORTANT: Encourage understanding over copying.`;
 
-    const apiMessages = [
+    const apiMessages: ChatMessage[] = [
       ...messages.map((m) => ({ role: m.role, content: m.content })),
       { role: userMessage.role, content: userMessage.content }
     ];
 
-    let assistantContent = "";
+    const assistantMessageId = (Date.now() + 1).toString();
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: assistantMessageId,
+        role: "assistant",
+        content: "",
+        timestamp: new Date(),
+      },
+    ]);
 
     try {
-      const response = await fetch(CHAT_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-        },
-        body: JSON.stringify({ 
-          messages: apiMessages,
-          systemPrompt: systemMessage.content
-        }),
+      await streamChatCompletion(apiMessages, systemPrompt, (chunk) => {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMessageId
+              ? { ...m, content: m.content + chunk }
+              : m
+          )
+        );
       });
-
-      if (!response.ok) {
-        if (response.status === 429) {
-          toast.error("Rate limit exceeded. Please try again in a moment.");
-          throw new Error("Rate limit exceeded");
-        }
-        if (response.status === 402) {
-          toast.error("Service temporarily unavailable.");
-          throw new Error("Payment required");
-        }
-        throw new Error("Failed to get response");
-      }
-
-      if (!response.body) throw new Error("No response body");
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let textBuffer = "";
-
-      const assistantMessageId = (Date.now() + 1).toString();
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: assistantMessageId,
-          role: "assistant",
-          content: "",
-          timestamp: new Date(),
-        },
-      ]);
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        textBuffer += decoder.decode(value, { stream: true });
-
-        let newlineIndex: number;
-        while ((newlineIndex = textBuffer.indexOf("\n")) !== -1) {
-          let line = textBuffer.slice(0, newlineIndex);
-          textBuffer = textBuffer.slice(newlineIndex + 1);
-
-          if (line.endsWith("\r")) line = line.slice(0, -1);
-          if (line.startsWith(":") || line.trim() === "") continue;
-          if (!line.startsWith("data: ")) continue;
-
-          const jsonStr = line.slice(6).trim();
-          if (jsonStr === "[DONE]") break;
-
-          try {
-            const parsed = JSON.parse(jsonStr);
-            const content = parsed.choices?.[0]?.delta?.content as string | undefined;
-            if (content) {
-              assistantContent += content;
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantMessageId
-                    ? { ...m, content: assistantContent }
-                    : m
-                )
-              );
-            }
-          } catch {
-            textBuffer = line + "\n" + textBuffer;
-            break;
-          }
-        }
-      }
     } catch (error) {
       console.error("Solver error:", error);
-      toast.error("Failed to solve. Please try again.");
+      if (error instanceof Error && error.message === "Rate limit exceeded") {
+        toast.error("Rate limit exceeded. Please try again in a moment.");
+      } else {
+        toast.error("Failed to solve. Please try again.");
+      }
       setMessages((prev) => {
         const last = prev[prev.length - 1];
         if (last?.role === "assistant" && !last.content) {
