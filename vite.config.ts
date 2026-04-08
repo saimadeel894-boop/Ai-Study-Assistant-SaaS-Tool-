@@ -9,10 +9,10 @@ export default defineConfig(({ mode }) => ({
     host: "::",
     port: 8080,
     proxy: {
-      '/api/openai': {
-        target: 'https://api.openai.com',
+      '/api/v1': {
+        target: 'https://api.openai.com/v1',
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/openai/, '')
+        rewrite: (path) => path.replace(/^\/api\/v1/, '')
       }
     }
   },

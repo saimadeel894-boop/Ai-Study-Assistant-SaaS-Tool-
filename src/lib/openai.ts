@@ -1,6 +1,6 @@
 const OPENAI_API_KEY = import.meta.env.VITE_OPENAI_API_KEY;
 // Use vite proxy to avoid CORS issues in development
-const OPENAI_URL = "/api/openai/v1/chat/completions";
+const OPENAI_URL = "/api/v1/chat/completions";
 
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
